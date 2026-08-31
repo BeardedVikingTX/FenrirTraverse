@@ -1,0 +1,211 @@
+# ═══════════════════════════════════════════════════════════════
+# FENRIR TRAVERSE – Complete Dependency Manifest
+# ═══════════════════════════════════════════════════════════════
+# 
+# INSTALL: pip install -r requirements.txt
+# 
+# NOTE: Some packages are optional; comment/uncomment as needed.
+#       All are listed for maximum flexibility.
+# ═══════════════════════════════════════════════════════════════
+
+
+# ──── CORE ASYNCHRONOUS ENGINE ───────────────────────────────
+# High-performance async HTTP client with connection pooling
+aiohttp
+
+# For rate limiting and concurrency control (optional but recommended)
+aiolimiter
+
+# DNS resolution improvements (async-friendly)
+aiodns
+
+# ──── GUI / HUD FRAMEWORK ────────────────────────────────────
+# Complete TUI framework with animations and widgets
+textual
+
+# Rich terminal formatting – colours, tables, progress bars
+rich
+
+# For ASCII/banner art and glowing text effects
+pyfiglet
+
+# ──── RESPONSE PARSING & ANALYSIS ───────────────────────────
+# HTML/XML parsing – essential for detecting error pages
+beautifulsoup4
+
+# Fast XML/HTML parser (recommended over html.parser)
+lxml
+
+# For JSON parsing and manipulation (built-in but included for clarity)
+# json
+
+# For detecting file signatures/magic bytes in responses
+python-magic
+
+# ──── ENVIRONMENT & CONFIGURATION ──────────────────────────
+# Load API keys and settings from .env files
+python-dotenv
+
+# For parsing and managing INI/conf files
+configparser
+
+# ──── AI / LLM INTEGRATION (COMPREHENSIVE) ─────────────────
+# --- UNIVERSAL GATEWAYS ---
+# OpenRouter – unified API for 100+ models
+openrouter
+
+# --- DIRECT PROVIDERS ---
+# OpenAI (GPT-4, GPT-3.5, etc.) – also used by DeepSeek
+openai
+
+# Anthropic Claude
+anthropic
+
+# Google Gemini / PaLM
+google-generativeai
+
+# Mistral AI
+mistralai
+
+# DeepSeek (via OpenAI-compatible endpoint)
+# Already covered by openai library above
+
+# Cohere
+cohere
+
+# Hugging Face (for inference and model access)
+huggingface-hub
+
+# Together AI
+together
+
+# Replicate (for running open-source models)
+replicate
+
+# Groq (for fast inference)
+groq
+
+# Perplexity AI
+perplexity
+
+# --- LOCAL / SELF-HOSTED AI ---
+# For running local models via Ollama
+ollama
+
+# For local LLM inference with llama.cpp
+llama-cpp-python
+
+# For running models with Hugging Face Transformers
+transformers
+torch
+torchvision
+torchaudio
+
+# For quantized model loading
+bitsandbytes
+accelerate
+
+# ──── NETWORKING & SECURITY ──────────────────────────────────
+# Random User-Agent generation to avoid detection
+fake-useragent
+
+# Robust retry logic with exponential backoff
+tenacity
+
+# Proxy rotation support
+requests
+python-socks
+
+# SSL/TLS fingerprint randomization (advanced evasion)
+curl-cffi
+
+# HTTP/2 and HTTP/3 support
+h2
+aioquic
+
+# For IP rotation via Tor
+stem
+
+# ──── CONCURRENCY & PERFORMANCE ─────────────────────────────
+# Async-compatible progress bars
+tqdm
+
+# For efficient async queue management
+anyio
+
+# For parallel processing (CPU-bound tasks)
+joblib
+
+# ──── DATA PROCESSING & UTILITIES ──────────────────────────
+# For extracting URLs/emails/IPs from responses
+regex
+
+# For natural language processing (LLM pre/post-processing)
+nltk
+
+# For advanced string manipulation
+python-Levenshtein
+
+# Color management for UI
+colour
+
+# For generating terminal animations
+asciimatics
+
+# ──── REPORTING & OUTPUT ────────────────────────────────────
+# For generating JSON/HTML reports
+json
+jinja2
+
+# For exporting findings to Markdown
+markdown
+
+# For CSV exports
+csv
+
+# ──── TESTING & DEBUGGING ──────────────────────────────────
+# For writing unit tests
+pytest
+pytest-asyncio
+
+# For mocking HTTP requests during testing
+pytest-httpx
+
+# For debugging network traffic
+httpie
+
+# ──── OPTIONAL / SPECIALISED ──────────────────────────────
+# For picking up clipboard content (if needed)
+pyperclip
+
+# For advanced terminal manipulation
+curses
+
+# For sound notifications on discoveries
+playsound
+
+# For system tray notifications (macOS/Linux/Windows)
+plyer
+
+# For hashing and encryption
+cryptography
+
+# For Base64, URL, and other encodings (built-in but listing for clarity)
+# base64
+# urllib.parse
+
+# ──── DEVELOPMENT TOOLS ─────────────────────────────────────
+# For code formatting and linting
+black
+flake8
+pylint
+
+# For type checking
+mypy
+
+# For live reload during development
+watchdog
+
+# ─────────────────────────────────────────────────────────────
+# END OF REQUIREMENTS
+# ─────────────────────────────────────────────────────────────

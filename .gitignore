@@ -1,0 +1,68 @@
+# ─── Virtual Environment ───
+venv/
+env/
+ENV/
+.venv/
+
+# ─── Environment Variables ───
+.env
+.env.local
+.env.*.local
+
+# ─── Python Cache ───
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dylib
+
+# ─── Distribution / Build ───
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+
+# ─── IDE / Editor ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# ─── Logs & Temporary Files ───
+*.log
+*.tmp
+*.temp
+*.out
+
+# ─── Test & Coverage ───
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ─── OS Artifacts ───
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Reports / Outputs (optional) ───
+hits/
+reports/
+*.html
+*.json
+*.csv
+
+# ─── Your custom data files (keep them if they’re part of the repo) ───
+# If these are generated, uncomment:
+# deep_link_payloads.txt
+# files.txt
+# api_tokens.txt
+
+# ─── Misc ───
+*.lock
+*.pid
