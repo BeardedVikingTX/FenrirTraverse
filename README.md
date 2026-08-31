@@ -20,7 +20,7 @@ FenrirTraverse is a high‑speed, asynchronous path traversal scanner built for 
 ## 📦 Installation
 
 ```bash
-git clone https://github.com/beardedviking/fenrir-traverse.git
+git clone https://github.com/BeardedVikingTX/FenrirTraverse
 cd fenrir-traverse
 python3 -m venv venv
 source venv/bin/activate      # On Windows: venv\Scripts\activate
