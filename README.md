@@ -81,6 +81,17 @@ DEEPSEEK_API_KEY=...
 HUGGINGFACE_API_KEY=hf_...
 ```
 The tool will automatically try each provider in order and fall back if one is exhausted or unavailable.
+Please feel free to get your API Keys for each of the AI LLM's here;
+* [Mistral AI API Keys](https://console.mistral.ai/)
+* [OpenRouter](https://openrouter.ai)
+* [Groq](https://console.groq.com/keys)
+* [Cohere](https://dashboard.cohere.com)
+* [Google AI](https://aistudio.google.com)
+* [Anthropic](https://platform.claude.com)
+* [OpenAI](https://platform.openai.com)
+* [Together](https://api.together.ai)
+* [Replicate](https://replicate.com/)
+* [Perplexity](https://console.perplexity.ai/auth/login?redirectUrl=%2F)
 
 # ⚠️ Important Disclaimer
 ***This tool is intended for authorised security testing only.***

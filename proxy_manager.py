@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-proxy_manager.py – FenrirTraverse Enhanced Proxy Manager
+proxy_manager.py – FenrirTraverse Enhanced Proxy Manager (v3)
 ───────────────────────────────────────────────────────────
 Handles BOTH free and premium proxies with automatic detection,
-priority rotation, failure tracking, and health scoring.
+priority rotation, failure tracking, health scoring, and persistence.
 
 Features:
-- Auto-detects premium proxies (those with username:password)
-- Prioritizes premium proxies over free ones
+- Auto-detects premium proxies (auth present)
+- Supports SOCKS4, SOCKS5, HTTP, HTTPS
+- Prioritizes premium > proven free > untested
 - Tracks success rate per proxy (health score)
 - Smart rotation – prefers healthier proxies
 - Background re-validation of dead proxies
-- Supports HTTP, HTTPS, SOCKS5 with/without auth
+- Preserves health data across reloads (merges)
+- Optional persistent state (save/load)
+- Configurable validation URL(s)
 
 Author: BeardedViking
 License: MIT
 """
 
 import asyncio
+import json
 import logging
 import random
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Tuple, Set
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from typing import List, Optional, Dict, Tuple, Set, Any
 from urllib.parse import urlparse
 
 import aiohttp
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Proxy:
     """Represents a single proxy with health tracking."""
-    protocol: str          # 'http', 'https', 'socks5'
+    protocol: str          # 'http', 'https', 'socks4', 'socks5', 'socks5h'
     host: str
     port: int
     username: Optional[str] = None
@@ -51,13 +54,13 @@ class Proxy:
 
     @property
     def url(self) -> str:
-        """Proxy URL for aiohttp (e.g., http://user:pass@host:port)."""
+        """Proxy URL (e.g., http://user:pass@host:port)."""
         auth = f"{self.username}:{self.password}@" if self.username else ""
         return f"{self.protocol}://{auth}{self.host}:{self.port}"
 
     @property
     def success_rate(self) -> float:
-        """Calculate success rate as a percentage."""
+        """Success rate as percentage."""
         total = self.success_count + self.failure_count
         if total == 0:
             return 0.0
@@ -65,23 +68,19 @@ class Proxy:
 
     @property
     def is_alive(self) -> bool:
-        """Proxy is alive if it has a decent success rate."""
-        # If never used, consider alive
+        """Proxy considered alive if never used or success_rate ≥ 50%."""
         if self.success_count + self.failure_count == 0:
             return True
-        return self.success_rate >= 50.0  # 50% threshold
+        return self.success_rate >= 50.0
 
     @classmethod
     def from_string(cls, proxy_str: str) -> Optional['Proxy']:
-        """
-        Parse a proxy string. Auto-detects premium (auth) vs free.
-        Format: proto://[user:pass@]host:port
-        """
+        """Parse proxy string. Auto-detects premium (auth)."""
         proxy_str = proxy_str.strip()
         if not proxy_str:
             return None
 
-        # If no protocol specified, assume http
+        # Default to http if no protocol
         if not re.match(r'^[a-z]+://', proxy_str):
             proxy_str = f"http://{proxy_str}"
 
@@ -90,13 +89,14 @@ class Proxy:
             return None
 
         protocol = parsed.scheme.lower()
-        if protocol not in ('http', 'https', 'socks5', 'socks5h'):
+        allowed = {'http', 'https', 'socks4', 'socks5', 'socks5h'}
+        if protocol not in allowed:
             logger.warning(f"Unsupported proxy protocol: {protocol}")
             return None
 
         username = parsed.username
         password = parsed.password
-        is_premium = bool(username and password)  # premium if auth present
+        is_premium = bool(username and password)
 
         return cls(
             protocol=protocol,
@@ -115,282 +115,320 @@ class Proxy:
         self.failure_count += 1
         self.last_used = datetime.now()
 
+    def to_dict(self) -> dict:
+        """Convert to dict for persistence."""
+        d = asdict(self)
+        d['last_used'] = self.last_used.isoformat() if self.last_used else None
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Proxy':
+        """Restore from dict."""
+        last_used = data.get('last_used')
+        if last_used:
+            data['last_used'] = datetime.fromisoformat(last_used)
+        return cls(**data)
+
+
 # ─── Proxy Pool Manager ─────────────────────────────────────
 
 class ProxyManager:
     """
     Manages a hybrid pool of free and premium proxies.
-    Prioritizes premium proxies, falls back to free ones,
-    and tracks health for intelligent rotation.
+    Supports HTTP, HTTPS, SOCKS4, SOCKS5.
     """
 
     def __init__(
         self,
         proxy_file: str = "proxies.txt",
-        max_failures: int = 5,           # failures before blacklisting
-        min_success_rate: float = 30.0,   # success % below this = dead
-        validation_url: str = "http://httpbin.org/ip",
+        max_failures: int = 5,
+        min_success_rate: float = 30.0,
+        validation_urls: Optional[List[str]] = None,
         validation_timeout: int = 5,
-        validation_interval: int = 300,  # seconds between re‑validations
+        validation_interval: int = 300,
         auto_reload: bool = True,
-        prefer_premium: bool = True,     # use premium first
+        prefer_premium: bool = True,
+        persistent_state_file: Optional[str] = "proxy_state.json",
     ):
         """
         :param proxy_file: Path to file containing proxies (one per line).
-        :param max_failures: Consecutive failures before marking dead.
+        :param max_failures: Consecutive failures before blacklisting.
         :param min_success_rate: Minimum success % to keep alive.
-        :param validation_url: URL used to test proxy functionality.
+        :param validation_urls: List of URLs to test proxy (fallback order).
         :param validation_timeout: Timeout per validation request.
-        :param validation_interval: How often to re‑validate dead proxies.
-        :param auto_reload: If True, periodically reload the file.
-        :param prefer_premium: If True, use premium proxies before free.
+        :param validation_interval: Seconds between re‑validations.
+        :param auto_reload: If True, periodically reload file (merge).
+        :param prefer_premium: Use premium proxies first.
+        :param persistent_state_file: Save/load health to this JSON file.
         """
         self.proxy_file = proxy_file
         self.max_failures = max_failures
         self.min_success_rate = min_success_rate
-        self.validation_url = validation_url
+        self.validation_urls = validation_urls or [
+            "http://httpbin.org/ip",
+            "http://ip-api.com/json",
+        ]
         self.validation_timeout = validation_timeout
         self.validation_interval = validation_interval
         self.auto_reload = auto_reload
         self.prefer_premium = prefer_premium
+        self.persistent_state_file = persistent_state_file
 
         # Internal state
-        self._all_proxies: List[Proxy] = []
+        self._all_proxies: Dict[str, Proxy] = {}  # key: proxy.url
         self._available_premium: List[Proxy] = []
         self._available_free: List[Proxy] = []
         self._dead: Set[str] = set()  # proxy URLs that are dead
         self._last_validation: Dict[str, float] = {}
-
         self._lock = asyncio.Lock()
-        self._premium_index = 0
-        self._free_index = 0
 
         self._validation_task = None
         self._stop_event = asyncio.Event()
 
-    # ─── Loading ─────────────────────────────────────────────
+    # ─── Loading / Persistence ──────────────────────────────
 
-    async def load(self) -> None:
-        """Load proxies from file. Auto-classifies as premium/free."""
+    async def load(self, merge: bool = True) -> None:
+        """Load proxies from file. If merge=True, preserve health for existing proxies."""
         try:
             with open(self.proxy_file, 'r') as f:
                 lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
         except FileNotFoundError:
-            logger.warning(f"Proxy file '{self.proxy_file}' not found. No proxies loaded.")
+            logger.warning(f"Proxy file '{self.proxy_file}' not found.")
             return
 
-        proxies = []
-        premium_count = 0
-        free_count = 0
-
+        new_proxies = {}
         for line in lines:
             p = Proxy.from_string(line)
             if p:
-                proxies.append(p)
-                if p.is_premium:
-                    premium_count += 1
-                else:
-                    free_count += 1
-            else:
-                logger.debug(f"Skipping invalid proxy line: {line}")
+                new_proxies[p.url] = p
 
         async with self._lock:
-            self._all_proxies = proxies
-            self._available_premium = [p for p in proxies if p.is_premium]
-            self._available_free = [p for p in proxies if not p.is_premium]
-            self._dead.clear()
-            self._last_validation.clear()
-            self._premium_index = 0
-            self._free_index = 0
+            if merge and self._all_proxies:
+                # Merge: keep old health data for proxies that still exist
+                for url, old_p in self._all_proxies.items():
+                    if url in new_proxies:
+                        new_proxies[url].success_count = old_p.success_count
+                        new_proxies[url].failure_count = old_p.failure_count
+                        new_proxies[url].last_used = old_p.last_used
 
-        logger.info(
-            f"Loaded {len(proxies)} proxies "
-            f"({premium_count} premium, {free_count} free) "
-            f"from {self.proxy_file}"
-        )
+            self._all_proxies = new_proxies
+
+            # Mark dead only if proxy has been used and is failing
+            self._dead.clear()
+            for url, p in self._all_proxies.items():
+                total_attempts = p.success_count + p.failure_count
+                if total_attempts > 0:
+                    if p.failure_count >= self.max_failures or p.success_rate < self.min_success_rate:
+                        self._dead.add(url)
+                # else: untested -> alive
+
+            # Now rebuild available lists based on updated _dead
+            self._rebuild_available_lists()
+
+            logger.info(
+                f"Loaded {len(new_proxies)} proxies "
+                f"(premium: {sum(1 for p in new_proxies.values() if p.is_premium)}, "
+                f"free: {sum(1 for p in new_proxies.values() if not p.is_premium)})"
+            )
+
+    async def save_state(self) -> None:
+        """Save current health data to JSON file."""
+        if not self.persistent_state_file:
+            return
+        data = [p.to_dict() for p in self._all_proxies.values()]
+        try:
+            with open(self.persistent_state_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.debug(f"Saved proxy state to {self.persistent_state_file}")
+        except Exception as e:
+            logger.error(f"Failed to save proxy state: {e}")
+
+    async def load_state(self) -> None:
+        """Load health data from JSON file and merge with current proxies."""
+        if not self.persistent_state_file:
+            return
+        try:
+            with open(self.persistent_state_file, 'r') as f:
+                data = json.load(f)
+            restored = [Proxy.from_dict(item) for item in data]
+            async with self._lock:
+                restored_map = {p.url: p for p in restored}
+                # Merge into existing proxies
+                for url, p in self._all_proxies.items():
+                    if url in restored_map:
+                        p.success_count = restored_map[url].success_count
+                        p.failure_count = restored_map[url].failure_count
+                        p.last_used = restored_map[url].last_used
+                self._rebuild_available_lists()
+                self._dead = {url for url, p in self._all_proxies.items()
+                              if p.failure_count >= self.max_failures or p.success_rate < self.min_success_rate}
+            logger.info(f"Loaded proxy state from {self.persistent_state_file}")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.error(f"Failed to load proxy state: {e}")
+
+    def _rebuild_available_lists(self) -> None:
+        """Rebuild premium/free lists from _all_proxies, excluding dead."""
+        self._available_premium = [
+            p for p in self._all_proxies.values()
+            if p.is_premium and p.url not in self._dead
+        ]
+        self._available_free = [
+            p for p in self._all_proxies.values()
+            if not p.is_premium and p.url not in self._dead
+        ]
 
     # ─── Validation ──────────────────────────────────────────
 
     @staticmethod
-    async def _validate_single(proxy: Proxy, validation_url: str, timeout: int) -> bool:
-        """Test a single proxy by making a request to validation_url."""
-        try:
-            # For SOCKS proxies, we need a special connector
-            if proxy.protocol.startswith('socks'):
-                try:
-                    import aiohttp_socks
-                    connector = aiohttp_socks.SocksConnector.from_url(proxy.url)
-                except ImportError:
-                    logger.warning("aiohttp_socks not installed, skipping SOCKS validation")
-                    return False
-            else:
-                connector = aiohttp.TCPConnector(ssl=False)
+    async def _validate_single(proxy: Proxy, validation_urls: List[str], timeout: int) -> bool:
+        """Test a single proxy against a list of URLs (fallback)."""
+        for url in validation_urls:
+            try:
+                connector = None
+                if proxy.protocol.startswith('socks'):
+                    try:
+                        import aiohttp_socks
+                        connector = aiohttp_socks.SocksConnector.from_url(proxy.url)
+                    except ImportError:
+                        logger.warning("aiohttp_socks not installed, cannot validate SOCKS proxy")
+                        return False
+                else:
+                    connector = aiohttp.TCPConnector(ssl=False)
 
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(
-                    validation_url,
-                    proxy=proxy.url if not proxy.protocol.startswith('socks') else None,
-                    timeout=aiohttp.ClientTimeout(total=timeout),
-                    ssl=False,
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if 'origin' in data:
-                            return True
-                    return False
-        except Exception as e:
-            logger.debug(f"Proxy {proxy.url} validation failed: {e}")
-            return False
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.get(
+                        url,
+                        proxy=proxy.url if not proxy.protocol.startswith('socks') else None,
+                        timeout=aiohttp.ClientTimeout(total=timeout),
+                        ssl=False if proxy.protocol.startswith('socks') else None,
+                    ) as resp:
+                        if resp.status == 200:
+                            # Check if response contains IP or origin
+                            text = await resp.text()
+                            if any(k in text.lower() for k in ['ip', 'origin']):
+                                return True
+            except Exception as e:
+                logger.debug(f"Proxy {proxy.url} failed validation via {url}: {e}")
+                continue
+        return False
 
-    async def validate_all(self, concurrency: int = 10) -> Dict[str, bool]:
-        """
-        Validate all proxies in the pool concurrently.
-        Returns dict {proxy_url: is_alive}.
-        """
+    async def validate_all(self, concurrency: int = 20) -> Dict[str, bool]:
+        """Validate all proxies concurrently. Returns {url: alive}."""
         async with self._lock:
-            proxies_to_check = self._all_proxies.copy()
+            proxies = list(self._all_proxies.values())
 
         semaphore = asyncio.Semaphore(concurrency)
 
         async def check(p: Proxy) -> Tuple[str, bool]:
             async with semaphore:
-                alive = await self._validate_single(p, self.validation_url, self.validation_timeout)
+                alive = await self._validate_single(p, self.validation_urls, self.validation_timeout)
                 return p.url, alive
 
-        tasks = [check(p) for p in proxies_to_check]
+        tasks = [check(p) for p in proxies]
         results = await asyncio.gather(*tasks)
 
-        # Update internal state
         alive_urls = {url for url, alive in results if alive}
         async with self._lock:
-            # Rebuild available lists based on validation
-            self._available_premium = [
-                p for p in self._all_proxies
-                if p.is_premium and p.url in alive_urls
-            ]
-            self._available_free = [
-                p for p in self._all_proxies
-                if not p.is_premium and p.url in alive_urls
-            ]
-            self._dead = {p.url for p in self._all_proxies if p.url not in alive_urls}
-            for p in self._all_proxies:
-                self._last_validation[p.url] = asyncio.get_event_loop().time()
+            # Update dead set and lists
+            self._dead = {p.url for p in proxies if p.url not in alive_urls}
+            self._rebuild_available_lists()
+            now = asyncio.get_event_loop().time()
+            for p in proxies:
+                self._last_validation[p.url] = now
 
-        logger.info(
-            f"Validation complete: "
-            f"{len(self._available_premium)} premium, "
-            f"{len(self._available_free)} free alive"
-        )
-
+        logger.info(f"Validation done: {len(alive_urls)} alive, {len(proxies)-len(alive_urls)} dead")
         return {url: alive for url, alive in results}
 
     # ─── Smart Rotation ──────────────────────────────────────
 
-    async def get_proxy(self, prefer_premium: bool = None) -> Optional[Proxy]:
+    async def get_proxy(self, prefer_premium: Optional[bool] = None) -> Optional[Proxy]:
         """
-        Get the next available proxy using smart rotation.
-        - Prefers premium proxies if available and prefer_premium=True.
-        - Prefers proxies with higher success rates.
-        - Falls back to free proxies when premium are exhausted.
+        Get next available proxy using smart rotation.
+        Order: premium > proven free (high success) > untested free.
         """
         if prefer_premium is None:
             prefer_premium = self.prefer_premium
 
         async with self._lock:
-            # Try premium first if configured
+            # Premium first
             if prefer_premium and self._available_premium:
-                proxy = self._get_best_proxy_from_list(self._available_premium)
+                proxy = self._select_best(self._available_premium)
                 if proxy:
                     return proxy
 
-            # Fall back to free proxies
-            if self._available_free:
-                proxy = self._get_best_proxy_from_list(self._available_free)
+            # Free proxies: separate proven vs untested
+            proven = [p for p in self._available_free if p.success_count + p.failure_count > 0]
+            untested = [p for p in self._available_free if p.success_count + p.failure_count == 0]
+
+            # Prefer proven proxies with high success rate
+            if proven:
+                proxy = self._select_best(proven)
                 if proxy:
                     return proxy
 
-            # No proxies available
+            # Fall back to untested
+            if untested:
+                return random.choice(untested)
+
             return None
 
-    def _get_best_proxy_from_list(self, proxy_list: List[Proxy]) -> Optional[Proxy]:
-        """
-        Get the best proxy from a list using weighted selection.
-        Prefers higher success rates and lower failure counts.
-        """
+    def _select_best(self, proxy_list: List[Proxy]) -> Optional[Proxy]:
+        """Weighted selection: prefer higher success rate, penalize failures."""
         if not proxy_list:
             return None
 
-        # Calculate weights based on success rate (higher = better)
         weights = []
         for p in proxy_list:
-            # Base weight: success rate, but ensure living proxies get a chance
             if p.success_count + p.failure_count == 0:
-                weight = 50.0  # Untested = medium weight
+                weight = 1.0   # untested very low
             else:
+                # Weight = success_rate, but boost if recent successes
                 weight = p.success_rate
+                # Add bonus for consecutive successes?
+                if p.success_count > p.failure_count:
+                    weight += 20
+                weight = max(weight, 1.0)
             weights.append(weight)
 
-        # Normalize weights (avoid division by zero)
         total = sum(weights)
         if total == 0:
-            # All weights zero? Pick randomly
             return random.choice(proxy_list)
 
-        # Weighted random selection
         r = random.uniform(0, total)
         cumulative = 0
         for i, weight in enumerate(weights):
             cumulative += weight
             if r <= cumulative:
                 return proxy_list[i]
-
-        return proxy_list[-1]  # Fallback
+        return proxy_list[-1]
 
     # ─── Success/Failure Tracking ────────────────────────────
 
     async def mark_success(self, proxy: Proxy) -> None:
-        """Record a successful request and update health."""
         async with self._lock:
             proxy.mark_success()
-            # If proxy was dead and now succeeds, revive it
             if proxy.url in self._dead:
                 self._dead.remove(proxy.url)
-                if proxy.is_premium:
-                    self._available_premium.append(proxy)
-                else:
-                    self._available_free.append(proxy)
+                self._rebuild_available_lists()
                 logger.info(f"Proxy {proxy.url} revived!")
 
     async def mark_failure(self, proxy: Proxy) -> None:
-        """Record a failure and potentially blacklist the proxy."""
         async with self._lock:
             proxy.mark_failure()
-
-            # Check if proxy should be blacklisted
-            should_blacklist = (
-                proxy.failure_count >= self.max_failures or
-                proxy.success_rate < self.min_success_rate
-            )
-
-            if should_blacklist:
+            if proxy.failure_count >= self.max_failures or proxy.success_rate < self.min_success_rate:
                 self._dead.add(proxy.url)
-                if proxy in self._available_premium:
-                    self._available_premium.remove(proxy)
-                if proxy in self._available_free:
-                    self._available_free.remove(proxy)
+                self._rebuild_available_lists()
                 logger.info(f"Proxy {proxy.url} blacklisted "
-                           f"(failures: {proxy.failure_count}, "
-                           f"rate: {proxy.success_rate:.1f}%)")
+                           f"(failures: {proxy.failure_count}, rate: {proxy.success_rate:.1f}%)")
 
     # ─── Statistics ──────────────────────────────────────────
 
-    def stats(self) -> Dict[str, any]:
-        """Return comprehensive pool statistics."""
+    def stats(self) -> Dict[str, Any]:
         total = len(self._all_proxies)
         premium_alive = len(self._available_premium)
         free_alive = len(self._available_free)
-
-        # Calculate average success rates
         all_alive = self._available_premium + self._available_free
         avg_rate = sum(p.success_rate for p in all_alive) / len(all_alive) if all_alive else 0
 
@@ -405,44 +443,39 @@ class ProxyManager:
             "free_ratio": f"{free_alive}/{total}",
         }
 
-    async def get_stats_async(self) -> Dict[str, any]:
-        """Async wrapper for stats (acquires lock)."""
+    async def get_stats_async(self) -> Dict[str, Any]:
         async with self._lock:
             return self.stats()
 
     # ─── Background Validation ──────────────────────────────
 
     async def _background_validator(self) -> None:
-        """Periodically re‑validate dead proxies and reload the file."""
+        """Periodically re‑validate dead proxies and reload file (merge)."""
         while not self._stop_event.is_set():
             try:
-                # Reload new proxies if file changed
                 if self.auto_reload:
-                    await self.load()
+                    await self.load(merge=True)
 
-                # Re‑validate dead proxies that haven't been checked recently
                 now = asyncio.get_event_loop().time()
                 to_revalidate = []
                 async with self._lock:
-                    for proxy in self._all_proxies:
-                        if proxy.url in self._dead:
-                            last = self._last_validation.get(proxy.url, 0)
-                            if now - last > self.validation_interval:
+                    for url in self._dead:
+                        if now - self._last_validation.get(url, 0) > self.validation_interval:
+                            proxy = self._all_proxies.get(url)
+                            if proxy:
                                 to_revalidate.append(proxy)
 
                 if to_revalidate:
                     logger.debug(f"Re-validating {len(to_revalidate)} dead proxies")
-                    sem = asyncio.Semaphore(3)
+                    sem = asyncio.Semaphore(5)
                     async def recheck(p: Proxy):
                         async with sem:
-                            alive = await self._validate_single(p, self.validation_url, self.validation_timeout)
+                            alive = await self._validate_single(p, self.validation_urls, self.validation_timeout)
                             if alive:
                                 async with self._lock:
                                     self._dead.discard(p.url)
-                                    if p.is_premium:
-                                        self._available_premium.append(p)
-                                    else:
-                                        self._available_free.append(p)
+                                    p.failure_count = 0  # reset failures if revived
+                                    self._rebuild_available_lists()
                                     logger.info(f"Proxy {p.url} revived in background")
                             self._last_validation[p.url] = now
 
@@ -455,13 +488,11 @@ class ProxyManager:
                 await asyncio.sleep(60)
 
     async def start_background_validation(self) -> None:
-        """Start the background validation task."""
         if self._validation_task is None:
             self._stop_event.clear()
             self._validation_task = asyncio.create_task(self._background_validator())
 
     async def stop_background_validation(self) -> None:
-        """Stop the background validation task."""
         if self._validation_task:
             self._stop_event.set()
             await self._validation_task
@@ -470,40 +501,55 @@ class ProxyManager:
     # ─── Context Manager ─────────────────────────────────────
 
     async def __aenter__(self):
-        await self.load()
+        await self.load(merge=False)  # initial load
+        if self.persistent_state_file:
+            await self.load_state()   # load health if exists
         await self.start_background_validation()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.stop_background_validation()
+        if self.persistent_state_file:
+            await self.save_state()
+
 
 # ─── Factory Function ──────────────────────────────────────
 
 def create_proxy_manager(**kwargs) -> ProxyManager:
-    """Convenience factory for creating a ProxyManager."""
     return ProxyManager(**kwargs)
+
 
 # ─── Example Usage ─────────────────────────────────────────
 
 async def main():
+    # Use a small file for quick testing
     pm = await create_proxy_manager(
-        proxy_file="proxies.txt",
+        proxy_file="proxies.txt",   # <-- small file
         max_failures=3,
         min_success_rate=30.0,
         prefer_premium=True,
+        persistent_state_file=None,        # disable persistence for clean test
+        validation_timeout=3,              # 3 seconds
     ).__aenter__()
+
+    total = len(pm._all_proxies)
+    print(f"Loaded {total} proxies. Validating...")
+
+    results = await pm.validate_all(concurrency=30)
+    alive = sum(1 for v in results.values() if v)
+    print(f"Alive: {alive}/{total}")
 
     print("Proxy stats:", await pm.get_stats_async())
 
-    # Get a proxy (premium preferred)
     proxy = await pm.get_proxy()
     if proxy:
         print(f"Using proxy: {proxy.url} (premium: {proxy.is_premium})")
-
-        # Simulate using it
         await pm.mark_success(proxy)
+    else:
+        print("No working proxy found.")
 
     await pm.__aexit__(None, None, None)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
